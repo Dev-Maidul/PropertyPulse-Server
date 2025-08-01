@@ -1,0 +1,970 @@
+require("dotenv").config();
+const Stripe = require("stripe");
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+const express = require("express");
+const cors = require("cors");
+var admin = require("firebase-admin");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf-8"
+);
+var serviceAccount = JSON.parse(decoded);
+const { getAuth } = require("firebase-admin/auth");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+const cookieParser = require("cookie-parser");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const jwt = require("jsonwebtoken");
+const port = process.env.PORT || 3000;
+const app = express();
+
+const corsOptions = {
+  origin: ["http://localhost:5173", "http://localhost:5174"],
+  credentials: true,
+  optionSuccessStatus: 200,
+};
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(cookieParser());
+
+// VerifyToken function
+const verifyToken = (req, res, next) => {
+  const token = req.cookies?.token;
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      console.log(err);
+      return res.status(401).send({ message: "unauthorized access" });
+    }
+    req.user = decoded;
+    next();
+  });
+};
+
+const client = new MongoClient(process.env.MONGODB_URI, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
+async function run() {
+  try {
+    await client.connect();
+    await client.db("admin").command({ ping: 1 });
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
+    // At the top, after you initialize admin
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+  const idToken = authHeader.split(" ")[1];
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.user = decodedToken; // Now req.user contains Firebase user info
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "Invalid token" });
+  }
+};
+    // All collections are here
+    const db = client.db("PropertyPulseDB");
+    const propertiesCollection = db.collection("properties");
+    const usersCollection = db.collection("users");
+    const wishlistCollection = db.collection("wishlist");
+    const reviewsCollection = db.collection("reviews");
+    const offersCollection = db.collection("offers");
+    //=====================Verify Admin and Agent=======================
+     const verifyAdmin = async (req, res, next) => {
+      const email = req?.user?.email
+      const user = await usersCollection.findOne({
+        email,
+      })
+      console.log(user?.role)
+      if (!user || user?.role !== 'admin')
+        return res
+          .status(403)
+          .send({ message: 'Admin only Actions!', role: user?.role })
+
+      next()
+    }
+
+    const verifyAgent = async (req, res, next) => {
+      const email = req?.user?.email
+      const user = await usersCollection.findOne({
+        email,
+      })
+      console.log(user?.role)
+      if (!user || user?.role !== 'agent')
+        return res
+          .status(403)
+          .send({ message: 'Admin only Actions!', role: user?.role })
+
+      next()
+    }
+    // =======================Admin related API==============
+    app.get("/admin/properties", async (req, res) => {
+      try {
+        const properties = await propertiesCollection.find().toArray();
+        res.send(properties);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch properties" });
+      }
+    });
+    // admin verified properties
+    app.patch("/admin/properties/verify/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await propertiesCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "Verified" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to verify property" });
+      }
+    });
+    // admin Rejected Properties
+    app.patch("/admin/properties/reject/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await propertiesCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "Rejected" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to reject property" });
+      }
+    });
+    // get all users
+    app.get("/admin/users", async (req, res) => {
+      try {
+        const users = await usersCollection.find().toArray();
+        res.send(users);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch users" });
+      }
+    });
+    // make admin api
+    app.patch("/admin/users/make-admin/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: "admin" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to make admin" });
+      }
+    });
+    // Make agent
+    app.patch("/admin/users/make-agent/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: "agent" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to make agent" });
+      }
+    });
+    // Make as a Fraud
+    app.patch("/admin/users/mark-fraud/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        // Find the user to get their email
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) return res.status(404).send({ message: "User not found" });
+
+        
+        await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isFraud: true, role: "fraud" } }
+        );
+      
+        await propertiesCollection.updateMany(
+          { agentEmail: user.email },
+          { $set: { status: "Fraud" } }
+        );
+        res.send({ message: "Marked as fraud and properties removed" });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to mark as fraud" });
+      }
+    });
+    // manage all review
+    app.get("/admin/reviews", async (req, res) => {
+      try {
+        const reviews = await reviewsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(reviews);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch reviews" });
+      }
+    });
+    // Delete reviews
+    app.delete("/admin/reviews/:reviewId", async (req, res) => {
+      try {
+        const reviewId = req.params.reviewId;
+        const result = await reviewsCollection.deleteOne({
+          _id: new ObjectId(reviewId),
+        });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to delete review" });
+      }
+    });
+    //==========================
+    app.post("/add-property", async (req, res) => {
+      try {
+        const { agentEmail } = req.body;
+        // Check if agent is fraud
+        const agent = await usersCollection.findOne({ email: agentEmail });
+        if (agent?.isFraud) {
+          return res
+            .status(403)
+            .send({ message: "Fraud agents cannot add properties." });
+        }
+        const result = await propertiesCollection.insertOne(req.body);
+        res.send({ acknowledged: true, insertedId: result.insertedId });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ acknowledged: false, message: "Failed to add property" });
+      }
+    });
+    // delete from database
+    app.delete("/admin/users/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) return res.status(404).send({ message: "User not found" });
+
+        await usersCollection.deleteOne({ _id: new ObjectId(id) });
+        if (user.firebaseUid) {
+          await admin.auth().deleteUser(user.firebaseUid);
+        } else {
+          const fbUser = await admin.auth().getUserByEmail(user.email);
+          await admin.auth().deleteUser(fbUser.uid);
+        }
+
+        res.send({ message: "User deleted from DB and Firebase" });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Failed to delete user", error: err.message });
+      }
+    });
+    // PATCH /admin/properties/advertise/:id
+    app.patch("/admin/properties/advertise/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await propertiesCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isAdvertised: true } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to advertise property" });
+      }
+    });
+    // GET /admin/verified-properties
+    app.get("/admin/verified-properties", async (req, res) => {
+      try {
+        const properties = await propertiesCollection
+          .find({ status: "Verified" })
+          .toArray();
+        res.send(properties);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch properties" });
+      }
+    });
+    // GET /advertised-properties
+    app.get("/advertised-properties", async (req, res) => {
+      try {
+        const properties = await propertiesCollection
+          .find({ isAdvertised: true, status: "Verified" })
+          .limit(4)
+          .toArray();
+        res.send(properties);
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Failed to fetch advertised properties" });
+      }
+    });
+    // GET /latest-reviews
+    app.get("/latest-reviews", async (req, res) => {
+      try {
+        const reviews = await reviewsCollection
+          .find({})
+          .sort({ createdAt: -1 })
+          .limit(3)
+          .toArray();
+        res.send(reviews);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch latest reviews" });
+      }
+    });
+    // POST /reports
+    app.post("/reports", async (req, res) => {
+      try {
+        const {
+          propertyId,
+          propertyTitle,
+          agentName,
+          reporterName,
+          reporterEmail,
+          description,
+        } = req.body;
+        const report = {
+          propertyId,
+          propertyTitle,
+          agentName,
+          reporterName,
+          reporterEmail,
+          description,
+          createdAt: new Date().toISOString(),
+        };
+        const result = await db.collection("reports").insertOne(report);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to submit report" });
+      }
+    });
+    // GET /admin/reports
+    app.get("/admin/reports", async (req, res) => {
+      try {
+        const reports = await db
+          .collection("reports")
+          .find({})
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(reports);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch reports" });
+      }
+    });
+    // DELETE /admin/remove-property/:propertyId
+    app.delete("/admin/remove-property/:propertyId", async (req, res) => {
+      try {
+        const propertyId = req.params.propertyId;
+        // Remove property
+        await db
+          .collection("properties")
+          .deleteOne({ _id: new ObjectId(propertyId) });
+        // Remove all reviews for this property
+        await db
+          .collection("reviews")
+          .deleteMany({ propertyId: new ObjectId(propertyId) });
+        // Optionally, remove all reports for this property
+        await db.collection("reports").deleteMany({ propertyId });
+        res.send({ message: "Property and related reviews removed" });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to remove property" });
+      }
+    });
+
+    //===========================Agent============================
+    app.patch("/agent/offers/accept/:offerId", async (req, res) => {
+      try {
+        const offerId = req.params.offerId;
+        // ১. Find the offer to get propertyId
+        const offer = await offersCollection.findOne({
+          _id: new ObjectId(offerId),
+        });
+        if (!offer) return res.status(404).send({ message: "Offer not found" });
+
+        // ২. Accept this offer
+        await offersCollection.updateOne(
+          { _id: new ObjectId(offerId) },
+          { $set: { status: "accepted" } }
+        );
+
+        //  Reject all other offers for this property
+        await offersCollection.updateMany(
+          {
+            propertyId: offer.propertyId,
+            _id: { $ne: new ObjectId(offerId) },
+          },
+          { $set: { status: "rejected" } }
+        );
+
+        res.send({ message: "Offer accepted and others rejected" });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to accept offer" });
+      }
+    });
+    // Reject offer
+    app.patch("/agent/offers/reject/:offerId", async (req, res) => {
+      try {
+        const offerId = req.params.offerId;
+        await offersCollection.updateOne(
+          { _id: new ObjectId(offerId) },
+          { $set: { status: "rejected" } }
+        );
+        res.send({ message: "Offer rejected" });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to reject offer" });
+      }
+    });
+    // Get all offers for properties added by this agent
+    app.get("/agent/offers/:agentEmail", async (req, res) => {
+      try {
+        const agentEmail = req.params.agentEmail;
+        const offers = await offersCollection
+          .find({ agentEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(offers);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch offers" });
+      }
+    });
+    // GET /agent/sold-properties/summary/:agentEmail
+    app.get("/agent/sold-properties/summary/:agentEmail", async (req, res) => {
+      try {
+        const agentEmail = req.params.agentEmail;
+        const soldOffers = await offersCollection
+          .find({ agentEmail, status: "bought" })
+          .toArray();
+
+        // Calculate total sold amount
+        const totalSold = soldOffers.reduce(
+          (sum, offer) => sum + Number(offer.offerAmount),
+          0
+        );
+
+        // For chart: group by propertyTitle and sum offerAmount
+        const chartData = [];
+        const map = {};
+        soldOffers.forEach((offer) => {
+          if (!map[offer.propertyTitle]) {
+            map[offer.propertyTitle] = 0;
+          }
+          map[offer.propertyTitle] += Number(offer.offerAmount);
+        });
+        for (const title in map) {
+          chartData.push({ property: title, amount: map[title] });
+        }
+
+        res.send({ totalSold, chartData });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch sold summary" });
+      }
+    });
+    // GET /agent/sold-properties/:agentEmail
+    app.get("/agent/sold-properties/:agentEmail", async (req, res) => {
+      try {
+        const agentEmail = req.params.agentEmail;
+        const soldOffers = await offersCollection
+          .find({ agentEmail, status: "bought" })
+          .toArray();
+        res.send(soldOffers);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch sold properties" });
+      }
+    });
+    //=======================User================================
+   // GET /properties - Search and sort properties
+app.get("/properties", async (req, res) => {
+  try {
+    const { location = "", sort = "" } = req.query;
+    const query = { status: "Verified" }; // Only verified properties
+
+    // Search by location (case-insensitive)
+    if (location) {
+      query.location = { $regex: location, $options: "i" };
+    }
+
+    // Fetch all matching properties
+    let properties = await propertiesCollection.find(query).toArray();
+
+    // Sort by price
+    if (sort === "asc" || sort === "desc") {
+      properties = properties.sort((a, b) => {
+        // Helper function to extract price from priceRange
+        const getPrice = (priceRange) => {
+          // Handle cases where priceRange is just a number (like "354")
+          if (!isNaN(priceRange)) return Number(priceRange);
+          
+          // Handle price ranges (like "300-400")
+          const prices = priceRange.split('-').map(Number);
+          return prices[0]; // Use the first number for sorting
+        };
+
+        const aPrice = getPrice(a.priceRange);
+        const bPrice = getPrice(b.priceRange);
+        return sort === "asc" ? aPrice - bPrice : bPrice - aPrice;
+      });
+    }
+
+    // Fetch agent images
+    const agentEmails = properties.map((p) => p.agentEmail);
+    const agents = await usersCollection
+      .find({ email: { $in: agentEmails } })
+      .toArray();
+
+    // Map properties with agent images
+    const propertiesWithAgentImage = properties.map((property) => {
+      const agent = agents.find((a) => a.email === property.agentEmail);
+      return {
+        ...property,
+        agentImage:
+          agent?.image || "https://i.ibb.co/2d9dK0F/default-profile.png",
+      };
+    });
+
+    res.status(200).json(propertiesWithAgentImage);
+  } catch (err) {
+    console.error("Error fetching properties:", err);
+    res.status(500).json({ message: "Failed to fetch properties" });
+  }
+});
+
+    // Get property details by ID
+    app.get("/property-details/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const property = await propertiesCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!property)
+          return res.status(404).send({ message: "Property not found" });
+        const agent = await usersCollection.findOne({
+          email: property.agentEmail,
+        });
+        property.agentImage =
+          agent?.image || "https://i.ibb.co/2d9dK0F/default-profile.png";
+
+        res.send(property);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch property details" });
+      }
+    });
+    // GET /properties?search=location&sort=asc
+    app.get("/properties", async (req, res) => {
+      try {
+        const { search = "", sort = "" } = req.query;
+        const query = { status: "Verified" };
+
+        // Search by location (case-insensitive)
+        if (search) {
+          query.location = { $regex: search, $options: "i" };
+        }
+
+        // Fetch all matching properties
+        let properties = await propertiesCollection.find(query).toArray();
+
+        // Sort by minimum price in priceRange
+        if (sort === "asc" || sort === "desc") {
+          properties = properties.sort((a, b) => {
+            const aMin = parseInt(a.priceRange.split("-")[0] || a.priceRange);
+            const bMin = parseInt(b.priceRange.split("-")[0] || b.priceRange);
+            return sort === "asc" ? aMin - bMin : bMin - aMin;
+          });
+        }
+
+        // Fetch agent images
+        const agentEmails = properties.map((p) => p.agentEmail);
+        const agents = await usersCollection
+          .find({ email: { $in: agentEmails } })
+          .toArray();
+
+        // Map properties with agent images
+        const propertiesWithAgentImage = properties.map((property) => {
+          const agent = agents.find((a) => a.email === property.agentEmail);
+          return {
+            ...property,
+            agentImage:
+              agent?.image || "https://i.ibb.co/2d9dK0F/default-profile.png",
+          };
+        });
+
+        res.status(200).json(propertiesWithAgentImage);
+      } catch (err) {
+        console.error("Error fetching properties:", err);
+        res.status(500).json({ message: "Failed to fetch properties" });
+      }
+    });
+
+    // // Add property to wishlist
+    app.post("/wishlist", async (req, res) => {
+      try {
+        const { userEmail, propertyId } = req.body;
+        const exists = await wishlistCollection.findOne({
+          userEmail,
+          propertyId: new ObjectId(propertyId),
+        });
+        if (exists)
+          return res.status(409).send({ message: "Already in wishlist" });
+
+        const result = await wishlistCollection.insertOne({
+          userEmail,
+          propertyId: new ObjectId(propertyId),
+          addedAt: new Date().toISOString(),
+        });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to add to wishlist" });
+      }
+    });
+    // get wishlist list from db
+    app.get("/wishlist/:userEmail", async (req, res) => {
+      try {
+        const userEmail = req.params.userEmail;
+        const wishlistItems = await wishlistCollection
+          .find({ userEmail })
+          .toArray();
+        const propertyIds = wishlistItems.map((item) => item.propertyId);
+
+        const properties = await propertiesCollection
+          .find({
+            _id: { $in: propertyIds },
+          })
+          .toArray();
+        const agentEmails = properties.map((p) => p.agentEmail);
+        const agents = await usersCollection
+          .find({ email: { $in: agentEmails } })
+          .toArray();
+
+        const propertiesWithAgentImage = properties.map((property) => {
+          const agent = agents.find((a) => a.email === property.agentEmail);
+          return {
+            ...property,
+            agentImage:
+              agent?.image || "https://i.ibb.co/2d9dK0F/default-profile.png",
+          };
+        });
+
+        res.send(propertiesWithAgentImage);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch wishlist" });
+      }
+    });
+    // get review from db
+    app.get("/reviews/:propertyId", async (req, res) => {
+      try {
+        const propertyId = req.params.propertyId;
+        const reviews = await reviewsCollection
+          .find({ propertyId: new ObjectId(propertyId) })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(reviews);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch reviews" });
+      }
+    });
+    // Delete review from db
+    app.delete("/wishlist", async (req, res) => {
+      try {
+        const { userEmail, propertyId } = req.body;
+        const result = await wishlistCollection.deleteOne({
+          userEmail,
+          propertyId: new ObjectId(propertyId),
+        });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to remove from wishlist" });
+      }
+    });
+
+    // Add a review for a property
+    app.post("/reviews", async (req, res) => {
+      try {
+        const { propertyId, userEmail, userName, userImage, rating, comment } =
+          req.body;
+        // Fetch property info
+        const property = await propertiesCollection.findOne({
+          _id: new ObjectId(propertyId),
+        });
+        const review = {
+          propertyId: new ObjectId(propertyId),
+          propertyTitle: property?.title || "",
+          agentName: property?.agentName || "",
+          userEmail,
+          userName,
+          userImage,
+          rating,
+          comment,
+          createdAt: new Date().toISOString(),
+        };
+        const result = await reviewsCollection.insertOne(review);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to add review" });
+      }
+    });
+
+    // add offer to db
+    app.post("/offers", async (req, res) => {
+      try {
+        const { propertyId, offerAmount, buyerEmail, buyerName, buyingDate } =
+          req.body;
+
+        // 1. Get user and property
+        const user = await usersCollection.findOne({ email: buyerEmail });
+        if (!user || user.role !== "customer") {
+          return res
+            .status(403)
+            .send({ message: "Only customers can make an offer." });
+        }
+
+        const property = await propertiesCollection.findOne({
+          _id: new ObjectId(propertyId),
+        });
+        if (!property) {
+          return res.status(404).send({ message: "Property not found." });
+        }
+
+        // 2. Validate offer amount
+        const [min, max] = property.priceRange.split("-").map(Number);
+        if (offerAmount < min || offerAmount > max) {
+          return res
+            .status(400)
+            .send({ message: `Offer must be between ${min} and ${max}` });
+        }
+
+        // 3. Check if offer already exists
+        const existingOffer = await offersCollection.findOne({
+          propertyId: new ObjectId(propertyId),
+          buyerEmail,
+        });
+        if (existingOffer) {
+          return res.status(409).send({
+            message: "You have already made an offer for this property.",
+          });
+        }
+
+        // 4. Save offer
+        const offer = {
+          propertyId: new ObjectId(propertyId),
+          propertyTitle: property.title,
+          propertyLocation: property.location,
+          propertyImage: property.imageUrl, // <-- add this line!
+          agentName: property.agentName,
+          agentEmail: property.agentEmail,
+          offerAmount,
+          buyerEmail,
+          buyerName,
+          buyingDate,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        };
+
+        const result = await offersCollection.insertOne(offer);
+        res.send({ acknowledged: true, insertedId: result.insertedId });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to make offer" });
+      }
+    });
+    // Get all offers for a user
+    app.get("/offers/:buyerEmail", async (req, res) => {
+      try {
+        const buyerEmail = req.params.buyerEmail;
+        const offers = await offersCollection
+          .find({ buyerEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(offers);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch offers" });
+      }
+    });
+    //====================Payment related Api=============
+    // Update offer after payment
+    app.post("/create-payment-intent", async (req, res) => {
+      try {
+        const { offerId } = req.body;
+
+        const offer = await offersCollection.findOne({
+          _id: new ObjectId(offerId),
+        });
+        if (!offer) return res.status(404).send({ message: "Offer not found" });
+
+        // Stripe expects amount in cents (for USD), for BDT use integer
+        const amount = Number(offer.offerAmount);
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: "usd", // or 'bdt' if your Stripe supports it
+          metadata: { offerId: offerId },
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to create payment intent" });
+      }
+    });
+    //
+    app.patch("/offers/payment/:offerId", async (req, res) => {
+      try {
+        const { transactionId } = req.body;
+        const offerId = req.params.offerId;
+        const result = await offersCollection.updateOne(
+          { _id: new ObjectId(offerId) },
+          { $set: { status: "bought", transactionId } }
+        );
+        res.send(result);
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Failed to update offer after payment" });
+      }
+    });
+    // =========================agent related api==============
+    // add properties to db
+    app.post("/add-property", async (req, res) => {
+      try {
+        const result = await propertiesCollection.insertOne(req.body);
+        res.send({ acknowledged: true, insertedId: result.insertedId });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ acknowledged: false, message: "Failed to add property" });
+      }
+    });
+    // GET /agent/properties?email=agent@example.com
+    app.get("/agent/properties", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.status(401).send({ message: "Email is required" });
+
+      const properties = await propertiesCollection
+        .find({ agentEmail: email })
+        .toArray();
+
+      const agent = await usersCollection.findOne({ email: email });
+
+      const propertiesWithAgentImage = properties.map((property) => ({
+        ...property,
+        agentImage: agent?.image || null,
+      }));
+
+      res.send(propertiesWithAgentImage);
+    });
+    // get agent property by id
+    app.get("/agent/property/:id", async (req, res) => {
+      const id = req.params.id;
+      const property = await propertiesCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      res.send(property);
+    });
+    // Get all sold properties for an agent
+    app.get("/agent/sold-properties/:agentEmail", async (req, res) => {
+      try {
+        const agentEmail = req.params.agentEmail;
+        // Find all offers for this agent where status is "bought"
+        const soldOffers = await offersCollection
+          .find({ agentEmail, status: "bought" })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(soldOffers);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch sold properties" });
+      }
+    });
+
+    // PUT /agent/property/:id
+    app.put("/agent/property/:id", async (req, res) => {
+      const id = req.params.id;
+      const updateData = req.body;
+
+      const result = await propertiesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updateData }
+      );
+      res.json(result);
+    });
+    // DELETE /agent/property/:id
+    app.delete("/agent/property/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await propertiesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+      res.json(result);
+    });
+    // =================== User Related Api ===================
+    app.post("/user", async (req, res) => {
+      const userData = req.body;
+      userData.role = "customer";
+      userData.created_at = new Date().toISOString();
+      userData.last_loggedIn = new Date().toISOString();
+
+      userData.name = userData.name || "Anonymous";
+      userData.image =
+        userData.image || "https://i.ibb.co/2d9dK0F/default-profile.png";
+
+      const query = { email: userData?.email };
+      const alreadyExists = await usersCollection.findOne(query);
+
+      if (!!alreadyExists) {
+        const result = await usersCollection.updateOne(query, {
+          $set: { last_loggedIn: new Date().toISOString() },
+        });
+        return res.send(result);
+      }
+
+      const result = await usersCollection.insertOne(userData);
+      res.send(result);
+    });
+    // // get a user's role
+    app.get("/user/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await usersCollection.findOne({ email });
+      if (!result) return res.status(404).send({ message: "User Not Found." });
+      res.send({ role: result?.role });
+    });
+    // user review
+    app.get("/my-reviews/:userEmail", async (req, res) => {
+      try {
+        const userEmail = req.params.userEmail;
+        const reviews = await reviewsCollection
+          .find({ userEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(reviews);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch reviews" });
+      }
+    });
+    // delete review
+    app.delete("/my-reviews/:reviewId", async (req, res) => {
+      try {
+        const reviewId = req.params.reviewId;
+        const result = await reviewsCollection.deleteOne({
+          _id: new ObjectId(reviewId),
+        });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to delete review" });
+      }
+    });
+    //===========================================
+  } finally {
+    // await client.close();
+  }
+}
+run().catch(console.dir);
+
+app.get("/", (req, res) => {
+  res.send("Hello from PropertyPulse Server..");
+});
+
+app.listen(port, () => {
+  console.log(`PropertyPulse is running on port ${port}`);
+});
